@@ -54,29 +54,6 @@ func NewSigner(opts ...signOption) *Signer {
 		}
 	}
 
-<<<<<<< HEAD
-	return rt(func(r *http.Request) (*http.Response, error) {
-		b := &bytes.Buffer{}
-		if r.Body != nil {
-			n, err := b.ReadFrom(r.Body)
-			if err != nil {
-				return nil, err
-			}
-
-			defer r.Body.Close()
-
-			if n != 0 {
-				r.Body = io.NopCloser(bytes.NewReader(b.Bytes()))
-			}
-		}
-
-		// Always set a digest (for now)
-		// TODO: we could skip setting digest on an empty body if content-length is included in the sig
-		r.Header.Set("Digest", calcDigest(b.Bytes()))
-
-		msg := messageFromRequest(r)
-		hdr, err := s.Sign(msg)
-=======
 	return &Signer{s}
 }
 
@@ -84,7 +61,6 @@ func (s *Signer) Sign(r *http.Request) error {
 	b := &bytes.Buffer{}
 	if r.Body != nil {
 		n, err := b.ReadFrom(r.Body)
->>>>>>> gools
 		if err != nil {
 			return err
 		}
@@ -181,14 +157,6 @@ func NewSignTransport(transport http.RoundTripper, opts ...signOption) http.Roun
 		if err := s.Sign(r); err != nil {
 			return nil, err
 		}
-<<<<<<< HEAD
-
-		for k, v := range hdr {
-			r.Header[k] = v
-		}
-
-=======
->>>>>>> gools
 		return transport.RoundTrip(r)
 	})
 }
