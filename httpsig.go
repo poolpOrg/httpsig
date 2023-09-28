@@ -9,6 +9,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -26,16 +27,13 @@ func sliceHas(haystack []string, needle string) bool {
 	return false
 }
 
-// NewSignTransport returns a new client transport that wraps the provided transport with
-// http message signing and body digest creation.
-//
-// Use the various `WithSign*` option funcs to configure signature algorithms with their provided
-// key ids. You must provide at least one signing option. A signature for every provided key id is
-// included on each request. Multiple included signatures allow you to gracefully introduce stronger
-// algorithms, rotate keys, etc.
-func NewSignTransport(transport http.RoundTripper, opts ...signOption) http.RoundTripper {
+type Signer struct {
+	signer
+}
+
+func NewSigner(opts ...signOption) *Signer {
 	s := signer{
-		keys:    map[string]sigHolder{},
+		keys:    make(map[string]sigHolder),
 		nowFunc: time.Now,
 	}
 
@@ -56,6 +54,7 @@ func NewSignTransport(transport http.RoundTripper, opts ...signOption) http.Roun
 		}
 	}
 
+<<<<<<< HEAD
 	return rt(func(r *http.Request) (*http.Response, error) {
 		b := &bytes.Buffer{}
 		if r.Body != nil {
@@ -77,14 +76,119 @@ func NewSignTransport(transport http.RoundTripper, opts ...signOption) http.Roun
 
 		msg := messageFromRequest(r)
 		hdr, err := s.Sign(msg)
+=======
+	return &Signer{s}
+}
+
+func (s *Signer) Sign(r *http.Request) error {
+	b := &bytes.Buffer{}
+	if r.Body != nil {
+		n, err := b.ReadFrom(r.Body)
+>>>>>>> gools
 		if err != nil {
+			return err
+		}
+		r.Body.Close()
+
+		if n != 0 {
+			r.Body = io.NopCloser(bytes.NewReader(b.Bytes()))
+		}
+	}
+
+	// Always set a digest (for now)
+	// TODO: we could skip setting digest on an empty body if content-length is included in the sig
+	r.Header.Set("Digest", calcDigest(b.Bytes()))
+
+	msg := messageFromRequest(r)
+	hdr, err := s.signer.Sign(msg)
+	if err != nil {
+		return err
+	}
+
+	for k, v := range hdr {
+		r.Header[k] = v
+	}
+
+	return nil
+}
+
+type VerifyingKey interface {
+	Verify(data []byte, signature []byte) error
+}
+
+type VerifyingKeyResolver interface {
+	Resolve(keyID string) VerifyingKey
+}
+
+type Verifier struct {
+	verifier
+}
+
+func NewVerifier(opts ...verifyOption) *Verifier {
+	v := verifier{
+		keys:    make(map[string]verHolder),
+		nowFunc: time.Now,
+	}
+
+	for _, o := range opts {
+		o.configureVerify(&v)
+	}
+
+	return &Verifier{v}
+}
+
+func (v *Verifier) Verify(r *http.Request) (keyID string, err error) {
+	msg := messageFromRequest(r)
+	keyID, err = v.verifier.Verify(msg)
+	if err != nil {
+		return keyID, err
+	}
+
+	b := &bytes.Buffer{}
+	if r.Body != nil {
+		n, err := b.ReadFrom(r.Body)
+		if err != nil {
+			return keyID, err
+		}
+		r.Body.Close()
+
+		if n != 0 {
+			r.Body = io.NopCloser(bytes.NewReader(b.Bytes()))
+		}
+	}
+
+	// Check the digest if set. We only support id-sha-256 for now.
+	// TODO: option to require this?
+	if dig := r.Header.Get("Digest"); dig != "" {
+		if !verifyDigest(b.Bytes(), dig) {
+			return keyID, errors.New("digest mismatch")
+		}
+	}
+	return keyID, nil
+}
+
+// NewSignTransport returns a new client transport that wraps the provided transport with
+// http message signing and body digest creation.
+//
+// Use the various `WithSign*` option funcs to configure signature algorithms with their provided
+// key ids. You must provide at least one signing option. A signature for every provided key id is
+// included on each request. Multiple included signatures allow you to gracefully introduce stronger
+// algorithms, rotate keys, etc.
+func NewSignTransport(transport http.RoundTripper, opts ...signOption) http.RoundTripper {
+	s := NewSigner(opts...)
+
+	return rt(func(r *http.Request) (*http.Response, error) {
+		if err := s.Sign(r); err != nil {
 			return nil, err
 		}
+<<<<<<< HEAD
 
 		for k, v := range hdr {
 			r.Header[k] = v
 		}
 
+=======
+>>>>>>> gools
 		return transport.RoundTrip(r)
 	})
 }
@@ -103,16 +207,8 @@ func (r rt) RoundTrip(req *http.Request) (*http.Response, error) { return r(req)
 // invalid signatures are rejected with a `400` response. Only one valid signature is required
 // from the known key ids. However, only the first known key id is checked.
 func NewVerifyMiddleware(opts ...verifyOption) func(http.Handler) http.Handler {
-
 	// TODO: form and multipart support
-	v := verifier{
-		keys:    make(map[string]verHolder),
-		nowFunc: time.Now,
-	}
-
-	for _, o := range opts {
-		o.configureVerify(&v)
-	}
+	v := NewVerifier(opts...)
 
 	serveErr := func(rw http.ResponseWriter) {
 		// TODO: better error and custom error handler
@@ -124,37 +220,10 @@ func NewVerifyMiddleware(opts ...verifyOption) func(http.Handler) http.Handler {
 
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-
-			msg := messageFromRequest(r)
-			err := v.Verify(msg)
-			if err != nil {
+			if _, err := v.Verify(r); err != nil {
 				serveErr(rw)
 				return
 			}
-
-			b := &bytes.Buffer{}
-			if r.Body != nil {
-				n, err := b.ReadFrom(r.Body)
-				if err != nil {
-					serveErr(rw)
-					return
-				}
-
-				defer r.Body.Close()
-
-				if n != 0 {
-					r.Body = io.NopCloser(bytes.NewReader(b.Bytes()))
-				}
-			}
-
-			// Check the digest if set. We only support id-sha-256 for now.
-			// TODO: option to require this?
-			if dig := r.Header.Get("Digest"); dig != "" {
-				if !verifyDigest(b.Bytes(), dig) {
-					serveErr(rw)
-				}
-			}
-
 			h.ServeHTTP(rw, r)
 		})
 	}
@@ -189,6 +258,12 @@ func WithHeaders(hdr ...string) signOption {
 	// TODO: use this to implement required headers in verify?
 	return &optImpl{
 		s: func(s *signer) { s.headers = hdr },
+	}
+}
+
+func WithVerifyingKeyResolver(resolver VerifyingKeyResolver) verifyOption {
+	return &optImpl{
+		v: func(v *verifier) { v.resolver = resolver },
 	}
 }
 

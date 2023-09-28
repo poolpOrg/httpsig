@@ -15,6 +15,7 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -31,62 +32,65 @@ type verHolder struct {
 }
 
 type verifier struct {
-	keys map[string]verHolder
+	keys     map[string]verHolder
+	resolver VerifyingKeyResolver
 
 	// For testing
 	nowFunc func() time.Time
 }
 
 // XXX: note about fail fast.
-func (v *verifier) Verify(msg *message) error {
+func (v *verifier) Verify(msg *message) (keyID string, err error) {
 	sigHdr := msg.Header.Get("Signature")
 	if sigHdr == "" {
-		return errNotSigned
+		return "", errNotSigned
 	}
 
 	paramHdr := msg.Header.Get("Signature-Input")
 	if paramHdr == "" {
-		return errNotSigned
+		return "", errNotSigned
 	}
 
 	sigParts := strings.Split(sigHdr, ", ")
 	paramParts := strings.Split(paramHdr, ", ")
 
 	if len(sigParts) != len(paramParts) {
-		return errMalformedSignature
+		return "", errMalformedSignature
 	}
 
 	// TODO: could be smarter about selecting the sig to verify, eg based
 	// on algorithm
 	var sigID string
 	var params *signatureParams
+	var paramsRaw string
 	for _, p := range paramParts {
 		pParts := strings.SplitN(p, "=", 2)
 		if len(pParts) != 2 {
-			return errMalformedSignature
+			return "", errMalformedSignature
 		}
 
 		candidate, err := parseSignatureInput(pParts[1])
 		if err != nil {
-			return errMalformedSignature
+			return "", errMalformedSignature
 		}
 
-		if _, ok := v.keys[candidate.keyID]; ok {
+		if _, ok := v.ResolveKey(candidate.keyID); ok {
 			sigID = pParts[0]
 			params = candidate
+			paramsRaw = pParts[1]
 			break
 		}
 	}
 
 	if params == nil {
-		return errUnknownKey
+		return "", errUnknownKey
 	}
 
 	var signature string
 	for _, s := range sigParts {
 		sParts := strings.SplitN(s, "=", 2)
 		if len(sParts) != 2 {
-			return errMalformedSignature
+			return params.keyID, errMalformedSignature
 		}
 
 		if sParts[0] == sigID {
@@ -97,18 +101,18 @@ func (v *verifier) Verify(msg *message) error {
 	}
 
 	if signature == "" {
-		return errMalformedSignature
+		return params.keyID, errMalformedSignature
 	}
 
-	ver := v.keys[params.keyID]
+	ver, _ := v.ResolveKey(params.keyID)
 	if ver.alg != "" && params.alg != "" && ver.alg != params.alg {
-		return errAlgMismatch
+		return params.keyID, errAlgMismatch
 	}
 
 	// verify signature. if invalid, error
 	sig, err := base64.StdEncoding.DecodeString(signature)
 	if err != nil {
-		return errMalformedSignature
+		return params.keyID, errMalformedSignature
 	}
 
 	verifier := ver.verifier()
@@ -138,29 +142,53 @@ func (v *verifier) Verify(msg *message) error {
 		}
 
 		if err != nil {
-			return err
+			return params.keyID, err
 		}
 	}
+	fmt.Fprintf(&b, "\"@signature-params\": %s", paramsRaw)
 
 	if _, err := verifier.w.Write(b.Bytes()); err != nil {
-		return err
-	}
-
-	if err = canonicalizeSignatureParams(verifier.w, params); err != nil {
-		return err
+		return params.keyID, err
 	}
 
 	err = verifier.verify(sig)
 	if err != nil {
-		return errInvalidSignature
+		return params.keyID, errInvalidSignature
 	}
 
 	// TODO: could put in some wiggle room
 	if params.expires != nil && params.expires.After(time.Now()) {
-		return errSignatureExpired
+		return params.keyID, errSignatureExpired
 	}
 
-	return nil
+	return params.keyID, nil
+}
+
+func (v *verifier) ResolveKey(keyID string) (verHolder, bool) {
+	if holder, ok := v.keys[keyID]; ok {
+		return holder, true
+	}
+
+	if v.resolver != nil {
+		key := v.resolver.Resolve(keyID)
+		if key != nil {
+			holder := verHolder{
+				verifier: func() verImpl {
+					in := bytes.NewBuffer(make([]byte, 0, 1024))
+					return verImpl{
+						w: in,
+						verify: func(sig []byte) error {
+							return key.Verify(in.Bytes(), sig)
+						},
+					}
+				},
+			}
+			v.keys[keyID] = holder
+			return holder, true
+		}
+	}
+
+	return verHolder{}, false
 }
 
 // XXX use vice here too.
@@ -247,7 +275,6 @@ func verifyEccEd25519(pk ed25519.PublicKey) verHolder {
 }
 
 func verifyHmacSha256(secret []byte) verHolder {
-	// TODO: add alg
 	return verHolder{
 		alg: "hmac-sha256",
 		verifier: func() verImpl {

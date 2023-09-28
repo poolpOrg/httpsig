@@ -180,8 +180,8 @@ func signEccEd25519(pk ed25519.PrivateKey) sigHolder {
 }
 
 func signHmacSha256(secret []byte) sigHolder {
-	// TODO: add alg description
 	return sigHolder{
+		alg: "hmac-sha256",
 		signer: func() sigImpl {
 			h := hmac.New(sha256.New, secret)
 
