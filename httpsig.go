@@ -33,8 +33,9 @@ type Signer struct {
 
 func NewSigner(opts ...signOption) *Signer {
 	s := signer{
-		keys:    make(map[string]sigHolder),
-		nowFunc: time.Now,
+		keys:       make(map[string]sigHolder),
+		nowFunc:    time.Now,
+		skipDigest: false,
 	}
 
 	for _, o := range opts {
@@ -58,22 +59,26 @@ func NewSigner(opts ...signOption) *Signer {
 }
 
 func (s *Signer) Sign(r *http.Request) error {
-	b := &bytes.Buffer{}
-	if r.Body != nil {
-		n, err := b.ReadFrom(r.Body)
-		if err != nil {
-			return err
-		}
-		r.Body.Close()
 
-		if n != 0 {
-			r.Body = io.NopCloser(bytes.NewReader(b.Bytes()))
+	if !s.skipDigest {
+
+		b := &bytes.Buffer{}
+		if r.Body != nil {
+			n, err := b.ReadFrom(r.Body)
+			if err != nil {
+				return err
+			}
+			r.Body.Close()
+
+			if n != 0 {
+				r.Body = io.NopCloser(bytes.NewReader(b.Bytes()))
+			}
 		}
+
+		// Always set a digest (for now)
+		// TODO: we could skip setting digest on an empty body if content-length is included in the sig
+		r.Header.Set("Digest", calcDigest(b.Bytes()))
 	}
-
-	// Always set a digest (for now)
-	// TODO: we could skip setting digest on an empty body if content-length is included in the sig
-	r.Header.Set("Digest", calcDigest(b.Bytes()))
 
 	msg := messageFromRequest(r)
 	hdr, err := s.signer.Sign(msg)
@@ -220,7 +225,13 @@ func (o *optImpl) configureVerify(v *verifier) { o.v(v) }
 
 // WithHeaders sets the list of headers that will be included in the signature.
 // The Digest header is always included (and the digest calculated).
-//
+func WithoutDigest() signOption {
+	// TODO: use this to implement required headers in verify?
+	return &optImpl{
+		s: func(s *signer) { s.skipDigest = true },
+	}
+}
+
 // If not provided, the default headers `content-type, content-length, host` are used.
 func WithHeaders(hdr ...string) signOption {
 	// TODO: use this to implement required headers in verify?

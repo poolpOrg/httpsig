@@ -36,7 +36,8 @@ type signer struct {
 	keys    map[string]sigHolder
 
 	// For testing
-	nowFunc func() time.Time
+	nowFunc    func() time.Time
+	skipDigest bool
 }
 
 func (s *signer) Sign(msg *message) (http.Header, error) {
